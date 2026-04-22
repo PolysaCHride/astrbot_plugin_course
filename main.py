@@ -55,11 +55,11 @@ class CoursePlugin(Star):
         nickname = str(event.get_sender_name())
 
         yield event.plain_result(
-            "请在 60 秒内发送 .ics 文件，或发送 WakeUp 分享口令（形如：...「32位口令」...）。\n"
-            "发送“退出”可取消。"
+            "请在 120 秒内发送 .ics 文件，或发送 WakeUp 分享口令（形如：...「32位口令」...）。\n"
+            "发送\"退出\"可取消。"
         )
 
-        @session_waiter(timeout=60, record_history_chains=False)
+        @session_waiter(timeout=120, record_history_chains=False)
         async def waiter(controller: SessionController, evt: AstrMessageEvent):
             text = (evt.message_str or "").strip()
             if text == "退出":
@@ -71,15 +71,16 @@ class CoursePlugin(Star):
             ics_path = self._storage.get_ics_path(user_id)
 
             if token:
+                await evt.send(evt.plain_result("正在获取课表..."))
                 data = await self._parser.fetch_wakeup_schedule(token)
                 if not data:
-                    await evt.send(
-                        evt.plain_result("无法获取 WakeUp 数据，请检查口令。")
-                    )
+                    await evt.send(evt.plain_result("无法获取 WakeUp 数据，请检查口令。"))
+                    controller.stop()
                     return
                 ics_content = self._parser.convert_wakeup_to_ics(data)
                 if not ics_content:
                     await evt.send(evt.plain_result("WakeUp 数据解析失败。"))
+                    controller.stop()
                     return
                 ics_path.write_text(ics_content, encoding="utf-8")
                 self._parser.clear_cache(str(ics_path))
@@ -94,6 +95,7 @@ class CoursePlugin(Star):
 
             file_url = await _try_get_file_url(evt)
             if file_url:
+                await evt.send(evt.plain_result("正在下载课表..."))
                 try:
                     await download_file(file_url, str(ics_path))
                     self._parser.clear_cache(str(ics_path))
@@ -107,11 +109,11 @@ class CoursePlugin(Star):
                 except Exception as e:
                     logger.error(f"[course] download ics failed: {e}")
                     await evt.send(evt.plain_result("文件下载失败，请重试。"))
+                    controller.stop()
                 return
 
-            await evt.send(
-                evt.plain_result("未识别到 .ics 文件或 WakeUp 口令，请重试。")
-            )
+            # 格式错误：静默等待，不发送任何消息，只重置超时
+            controller.keep(timeout=120, reset_timeout=True)
 
         try:
             await waiter(event)
@@ -141,11 +143,11 @@ class CoursePlugin(Star):
         yield event.plain_result(
             "请回复以下格式设置每日推送：\n"
             "开启 HH:MM （例如：开启 07:00）\n"
-            '或回复"关闭"禁用每日推送\n'
-            '60秒内有效，发送"退出"可取消。'
+            '或回复\"关闭\"禁用每日推送\n'
+            '120秒内有效，发送\"退出\"可取消。'
         )
 
-        @session_waiter(timeout=60, record_history_chains=False)
+        @session_waiter(timeout=120, record_history_chains=False)
         async def waiter(controller: SessionController, evt: AstrMessageEvent):
             text = (evt.message_str or "").strip()
             if text == "退出":
@@ -166,11 +168,7 @@ class CoursePlugin(Star):
             if len(parts) == 2 and parts[0] == "开启":
                 time_str = parts[1]
                 if not _is_valid_time_format(time_str):
-                    await evt.send(
-                        evt.plain_result(
-                            "时间格式错误，请使用 HH:MM 格式（例如：07:00）"
-                        )
-                    )
+                    controller.keep(timeout=120, reset_timeout=True)
                     return
 
                 bindings = self._storage.load_bindings()
@@ -184,7 +182,8 @@ class CoursePlugin(Star):
                 controller.stop()
                 return
 
-            await evt.send(evt.plain_result('格式错误，请回复"开启 HH:MM"或"关闭"'))
+            # 格式错误：静默等待，不发送错误消息
+            controller.keep(timeout=120, reset_timeout=True)
 
         try:
             await waiter(event)
@@ -203,10 +202,10 @@ class CoursePlugin(Star):
 
         yield event.plain_result(
             "请回复提前提醒的分钟数（例如：15 表示提前15分钟）\n"
-            '60秒内有效，发送"退出"可取消。'
+            '120秒内有效，发送"退出"可取消。'
         )
 
-        @session_waiter(timeout=60, record_history_chains=False)
+        @session_waiter(timeout=120, record_history_chains=False)
         async def waiter(controller: SessionController, evt: AstrMessageEvent):
             text = (evt.message_str or "").strip()
             if text == "退出":
@@ -217,7 +216,7 @@ class CoursePlugin(Star):
             try:
                 minutes = int(text)
                 if minutes < 1 or minutes > 120:
-                    await evt.send(evt.plain_result("分钟数需在 1-120 之间"))
+                    controller.keep(timeout=120, reset_timeout=True)
                     return
 
                 bindings = self._storage.load_bindings()
@@ -227,7 +226,8 @@ class CoursePlugin(Star):
                 await evt.send(evt.plain_result(f"已设置提前 {minutes} 分钟提醒"))
                 controller.stop()
             except ValueError:
-                await evt.send(evt.plain_result("请输入有效的数字"))
+                # 格式错误：静默等待，不发送错误消息
+                controller.keep(timeout=120, reset_timeout=True)
 
         try:
             await waiter(event)
