@@ -6,7 +6,9 @@ from typing import Dict, Optional, Set
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.message_components import Image
 from astrbot.api.star import Context, Star, register
+from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.utils.io import download_file
 from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
@@ -32,13 +34,17 @@ class CoursePlugin(Star):
         self._parser = IcsParser()
 
         self._reminded: Dict[str, Set[str]] = {}
-        self._daily_push_sent: Dict[str, date] = {}
         self._stop_event = asyncio.Event()
         self._reminder_task: Optional[asyncio.Task[None]] = None
 
     async def initialize(self):
         self._stop_event.clear()
         self._reminder_task = asyncio.create_task(self._reminder_loop())
+
+        bindings = self._storage.load_bindings()
+        for user_id, binding in bindings.items():
+            if binding.enable_daily_push and binding.daily_push_time:
+                await self._register_user_cron(user_id, binding.daily_push_time)
 
     async def terminate(self):
         self._stop_event.set()
@@ -112,7 +118,6 @@ class CoursePlugin(Star):
                     controller.stop()
                 return
 
-            # 格式错误：静默等待，不发送任何消息，只重置超时
             controller.keep(timeout=120, reset_timeout=True)
 
         try:
@@ -125,6 +130,9 @@ class CoursePlugin(Star):
     @filter.command("删除课表")
     async def delete(self, event: AstrMessageEvent):
         user_id = str(event.get_sender_id())
+
+        await self._unregister_user_cron(user_id)
+
         ok = self._storage.delete_binding(user_id)
         self._reminded.pop(user_id, None)
         if ok:
@@ -143,8 +151,8 @@ class CoursePlugin(Star):
         yield event.plain_result(
             "请回复以下格式设置每日推送：\n"
             "开启 HH:MM （例如：开启 07:00）\n"
-            '或回复\"关闭\"禁用每日推送\n'
-            '120秒内有效，发送\"退出\"可取消。'
+            '或回复"关闭"禁用每日推送\n'
+            '120秒内有效，发送"退出"可取消。'
         )
 
         @session_waiter(timeout=120, record_history_chains=False)
@@ -160,6 +168,7 @@ class CoursePlugin(Star):
                 if user_id in bindings:
                     bindings[user_id].enable_daily_push = False
                     self._storage.save_bindings(bindings)
+                await self._unregister_user_cron(user_id)
                 await evt.send(evt.plain_result("已关闭每日推送。"))
                 controller.stop()
                 return
@@ -176,13 +185,16 @@ class CoursePlugin(Star):
                     bindings[user_id].enable_daily_push = True
                     bindings[user_id].daily_push_time = time_str
                     self._storage.save_bindings(bindings)
+
+                await self._unregister_user_cron(user_id)
+                await self._register_user_cron(user_id, time_str)
+
                 await evt.send(
                     evt.plain_result(f"已开启每日推送，推送时间：{time_str}")
                 )
                 controller.stop()
                 return
 
-            # 格式错误：静默等待，不发送错误消息
             controller.keep(timeout=120, reset_timeout=True)
 
         try:
@@ -226,7 +238,6 @@ class CoursePlugin(Star):
                 await evt.send(evt.plain_result(f"已设置提前 {minutes} 分钟提醒"))
                 controller.stop()
             except ValueError:
-                # 格式错误：静默等待，不发送错误消息
                 controller.keep(timeout=120, reset_timeout=True)
 
         try:
@@ -311,7 +322,6 @@ class CoursePlugin(Star):
 
         now = datetime.now(SHANGHAI_TZ)
         today_date = now.date()
-        # 下周一是本周一 + 7 天
         start = week_start(today_date) + timedelta(days=7)
         days = []
         labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
@@ -357,11 +367,94 @@ class CoursePlugin(Star):
         )
         yield event.image_result(url)
 
+    async def _register_user_cron(self, user_id: str, time_str: str) -> None:
+        """为用户注册每日推送的 cron 任务"""
+        try:
+            hour, minute = map(int, time_str.split(":"))
+        except (ValueError, AttributeError):
+            logger.warning(f"[course] invalid time format for user {user_id}: {time_str}")
+            return
+
+        cron_expr = f"{minute} {hour} * * *"
+        job_id = f"course_daily_push_{user_id}"
+
+        binding = self._storage.get_binding(user_id)
+        if not binding:
+            return
+
+        payload = {
+            "user_id": user_id,
+            "unified_msg_origin": binding.unified_msg_origin,
+            "nickname": binding.nickname,
+            "ics_file": binding.ics_file,
+        }
+
+        try:
+            await self._context.cron_manager.add_basic_job(
+                name=f"每日课表推送_{user_id}",
+                cron_expression=cron_expr,
+                handler=self._daily_push_handler,
+                description="每日课表推送",
+                timezone="Asia/Shanghai",
+                payload=payload,
+                enabled=True,
+                persistent=True,
+            )
+            logger.info(f"[course] registered cron job for user {user_id} at {time_str}")
+        except Exception as e:
+            logger.error(f"[course] failed to register cron job for user {user_id}: {e}")
+
+    async def _unregister_user_cron(self, user_id: str) -> None:
+        """取消用户的每日推送 cron 任务"""
+        job_id = f"course_daily_push_{user_id}"
+        try:
+            await self._context.cron_manager.delete_job(job_id)
+            logger.info(f"[course] unregistered cron job for user {user_id}")
+        except Exception as e:
+            logger.debug(f"[course] failed to unregister cron job for user {user_id}: {e}")
+
+    async def _daily_push_handler(self, **payload) -> None:
+        """Cron 任务触发的每日推送处理函数"""
+        user_id = payload.get("user_id")
+        if not user_id:
+            logger.warning("[course] daily push handler missing user_id")
+            return
+
+        binding = self._storage.get_binding(user_id)
+        if not binding:
+            logger.info(f"[course] user {user_id} binding not found, skipping daily push")
+            return
+
+        if not binding.enable_daily_push:
+            logger.info(f"[course] user {user_id} daily push disabled, skipping")
+            return
+
+        try:
+            ics_path = (self._storage._base_dir / binding.ics_file).resolve()
+            events = self._parser.parse_ics_file(str(ics_path))
+            now = datetime.now(SHANGHAI_TZ)
+            today = now.date()
+            day_list = day_events(events, today)
+
+            title = "今日课表"
+            subtitle = f"{binding.nickname} | {today.strftime('%Y-%m-%d')}"
+            courses = [_event_view(e) for e in day_list]
+            url = await self.html_render(
+                DAY_TMPL,
+                {"title": title, "subtitle": subtitle, "courses": courses},
+            )
+
+            session = MessageSession.from_str(binding.unified_msg_origin)
+            chain = MessageChain([Image.fromURL(url)])
+            await self._context.send_message(session, chain)
+            logger.info(f"[course] daily push sent to user {user_id}")
+        except Exception as e:
+            logger.error(f"[course] daily push failed for user {user_id}: {e}")
+
     async def _reminder_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
                 await self._tick_reminder()
-                await self._tick_daily_push()
             except Exception as e:
                 logger.error(f"[course] reminder tick failed: {e}")
             try:
@@ -395,65 +488,8 @@ class CoursePlugin(Star):
                 reminded.add(key)
                 msg = _reminder_text(hit.event, binding.reminder_advance_minutes)
                 chain = MessageChain().message(msg)
-                await self._context.send_message(binding.unified_msg_origin, chain)
-
-    async def _tick_daily_push(self) -> None:
-        bindings = self._storage.load_bindings()
-        if not bindings:
-            return
-
-        now = datetime.now(SHANGHAI_TZ)
-        today = now.date()
-
-        expired_users = [
-            uid
-            for uid, last_date in self._daily_push_sent.items()
-            if (today - last_date).days > 7
-        ]
-        for uid in expired_users:
-            del self._daily_push_sent[uid]
-
-        for user_id, binding in bindings.items():
-            if not binding.enable_daily_push:
-                continue
-
-            try:
-                configured_hour, configured_minute = map(
-                    int, binding.daily_push_time.split(":")
-                )
-            except (ValueError, AttributeError):
-                logger.warning(
-                    f"[course] invalid daily_push_time for {user_id}: {binding.daily_push_time}"
-                )
-                continue
-
-            if now.hour != configured_hour or now.minute != configured_minute:
-                continue
-
-            last_sent = self._daily_push_sent.get(user_id)
-            if last_sent == today:
-                continue
-
-            self._daily_push_sent[user_id] = today
-
-            try:
-                ics_path = (self._storage._base_dir / binding.ics_file).resolve()
-                events = self._parser.parse_ics_file(str(ics_path))
-                day_list = day_events(events, today)
-
-                title = "今日课表"
-                subtitle = f"{binding.nickname} | {today.strftime('%Y-%m-%d')}"
-                courses = [_event_view(e) for e in day_list]
-                url = await self.html_render(
-                    DAY_TMPL,
-                    {"title": title, "subtitle": subtitle, "courses": courses},
-                )
-                from astrbot.api.event.message import Image
-
-                chain = MessageChain([Image.fromURL(url)])
-                await self._context.send_message(binding.unified_msg_origin, chain)
-            except Exception as e:
-                logger.error(f"[course] daily push failed for {user_id}: {e}")
+                session = MessageSession.from_str(binding.unified_msg_origin)
+                await self._context.send_message(session, chain)
 
 
 def _event_view(e: CourseEvent) -> Dict[str, str]:
