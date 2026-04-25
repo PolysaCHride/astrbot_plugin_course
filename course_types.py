@@ -34,3 +34,4 @@ class UserBinding:
     enable_daily_push: bool = False
     daily_push_time: str = "07:00"  # Format: HH:MM
     reminder_advance_minutes: int = 15
+    daily_push_job_id: str = ""

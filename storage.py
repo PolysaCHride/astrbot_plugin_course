@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import asdict
-from pathlib import Path
 from typing import Dict, Optional
 
 from astrbot.api import logger
-from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+from astrbot.api.star import StarTools
 
 from .course_types import UserBinding
 
@@ -15,7 +14,7 @@ from .course_types import UserBinding
 class CourseStorage:
     def __init__(self, plugin_name: str):
         self._plugin_name = plugin_name
-        self._base_dir = Path(get_astrbot_data_path()) / "plugin_data" / plugin_name
+        self._base_dir = StarTools.get_data_dir(plugin_name)
         self._ics_dir = self._base_dir / "ics"
         self._bindings_file = self._base_dir / "bindings.json"
 
@@ -48,6 +47,7 @@ class CourseStorage:
                     reminder_advance_minutes=int(
                         item.get("reminder_advance_minutes", 15)
                     ),
+                    daily_push_job_id=str(item.get("daily_push_job_id", "")),
                 )
             return bindings
         except Exception as e:
@@ -85,6 +85,7 @@ class CourseStorage:
         self, *, user_id: str, unified_msg_origin: str, nickname: str
     ) -> UserBinding:
         bindings = self.load_bindings()
+        prev = bindings.get(user_id)
         ics_path = self.get_ics_path(user_id)
         rel_ics = str(ics_path.relative_to(self._base_dir)).replace("\\", "/")
         binding = UserBinding(
@@ -93,6 +94,10 @@ class CourseStorage:
             nickname=nickname,
             ics_file=rel_ics,
             updated_at_ts=time.time(),
+            enable_daily_push=prev.enable_daily_push if prev else False,
+            daily_push_time=prev.daily_push_time if prev else "07:00",
+            reminder_advance_minutes=prev.reminder_advance_minutes if prev else 15,
+            daily_push_job_id=prev.daily_push_job_id if prev else "",
         )
         bindings[user_id] = binding
         self.save_bindings(bindings)

@@ -2,15 +2,9 @@ from __future__ import annotations
 
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 
+from astrbot.api import logger
 from icalendar import Calendar
 from dateutil.rrule import rrulestr
-
-try:
-    from astrbot.api import logger
-except Exception:
-    import logging
-
-    logger = logging.getLogger(__name__)
 
 from .course_types import CourseEvent
 
@@ -35,7 +29,11 @@ class IcsParser:
             logger.error(f"[course] cannot read ics: {e}")
             return []
 
-        cal = Calendar.from_ical(cal_content)
+        try:
+            cal = Calendar.from_ical(cal_content)
+        except Exception as e:
+            logger.error(f"[course] invalid ics format: {e}")
+            return []
         today = datetime.now(SHANGHAI_TZ).date()
 
         events: list[CourseEvent] = []
@@ -44,74 +42,84 @@ class IcsParser:
             if component.name != "VEVENT":
                 continue
 
-            summary = str(component.get("summary") or "")
-            description = str(component.get("description") or "")
-            location = str(component.get("location") or "")
-            dtstart = component.get("dtstart").dt
-            dtend = component.get("dtend").dt
-            rrule_str = component.get("rrule")
+            try:
+                summary = str(component.get("summary") or "")
+                description = str(component.get("description") or "")
+                location = str(component.get("location") or "")
+                dtstart_obj = component.get("dtstart")
+                dtend_obj = component.get("dtend")
+                if not dtstart_obj or not dtend_obj:
+                    logger.warning("[course] skip invalid vevent: missing dtstart/dtend")
+                    continue
+                dtstart = dtstart_obj.dt
+                dtend = dtend_obj.dt
+                rrule_str = component.get("rrule")
 
-            if isinstance(dtstart, date) and not isinstance(dtstart, datetime):
-                dtstart = datetime.combine(dtstart, dt_time.min)
-            if isinstance(dtend, date) and not isinstance(dtend, datetime):
-                dtend = datetime.combine(dtend, dt_time.min)
+                if isinstance(dtstart, date) and not isinstance(dtstart, datetime):
+                    dtstart = datetime.combine(dtstart, dt_time.min)
+                if isinstance(dtend, date) and not isinstance(dtend, datetime):
+                    dtend = datetime.combine(dtend, dt_time.min)
 
-            dtstart = (
-                dtstart.astimezone(SHANGHAI_TZ)
-                if getattr(dtstart, "tzinfo", None)
-                else dtstart.replace(tzinfo=SHANGHAI_TZ)
-            )
-            dtend = (
-                dtend.astimezone(SHANGHAI_TZ)
-                if getattr(dtend, "tzinfo", None)
-                else dtend.replace(tzinfo=SHANGHAI_TZ)
-            )
-
-            duration = dtend - dtstart
-
-            if rrule_str:
-                if "UNTIL" in rrule_str:
-                    until_dt = rrule_str["UNTIL"][0]
-                    if isinstance(until_dt, date) and not isinstance(
-                        until_dt, datetime
-                    ):
-                        until_dt = datetime.combine(until_dt, dt_time.max)
-                    if until_dt.tzinfo is None:
-                        until_dt = until_dt.replace(tzinfo=SHANGHAI_TZ)
-                    rrule_str["UNTIL"][0] = until_dt.astimezone(timezone.utc)
-
-                dtstart_utc = dtstart.astimezone(timezone.utc)
-                rule = rrulestr(rrule_str.to_ical().decode(), dtstart=dtstart_utc)
-
-                start_of_today_utc = datetime.now(timezone.utc).replace(
-                    hour=0, minute=0, second=0, microsecond=0
+                dtstart = (
+                    dtstart.astimezone(SHANGHAI_TZ)
+                    if getattr(dtstart, "tzinfo", None)
+                    else dtstart.replace(tzinfo=SHANGHAI_TZ)
                 )
-                future_limit_utc = start_of_today_utc + timedelta(days=365)
+                dtend = (
+                    dtend.astimezone(SHANGHAI_TZ)
+                    if getattr(dtend, "tzinfo", None)
+                    else dtend.replace(tzinfo=SHANGHAI_TZ)
+                )
 
-                for occ_utc in rule.between(
-                    start_of_today_utc, future_limit_utc, inc=True
-                ):
-                    occ_local = occ_utc.astimezone(SHANGHAI_TZ)
-                    events.append(
-                        CourseEvent(
-                            summary=summary,
-                            description=description,
-                            location=location,
-                            start_time=occ_local,
-                            end_time=occ_local + duration,
-                        )
+                duration = dtend - dtstart
+
+                if rrule_str:
+                    if "UNTIL" in rrule_str:
+                        until_dt = rrule_str["UNTIL"][0]
+                        if isinstance(until_dt, date) and not isinstance(
+                            until_dt, datetime
+                        ):
+                            until_dt = datetime.combine(until_dt, dt_time.max)
+                        if until_dt.tzinfo is None:
+                            until_dt = until_dt.replace(tzinfo=SHANGHAI_TZ)
+                        rrule_str["UNTIL"][0] = until_dt.astimezone(timezone.utc)
+
+                    dtstart_utc = dtstart.astimezone(timezone.utc)
+                    rule = rrulestr(rrule_str.to_ical().decode(), dtstart=dtstart_utc)
+
+                    start_of_today_utc = datetime.now(timezone.utc).replace(
+                        hour=0, minute=0, second=0, microsecond=0
                     )
-            else:
-                if dtstart.date() >= today:
-                    events.append(
-                        CourseEvent(
-                            summary=summary,
-                            description=description,
-                            location=location,
-                            start_time=dtstart,
-                            end_time=dtend,
+                    future_limit_utc = start_of_today_utc + timedelta(days=365)
+
+                    for occ_utc in rule.between(
+                        start_of_today_utc, future_limit_utc, inc=True
+                    ):
+                        occ_local = occ_utc.astimezone(SHANGHAI_TZ)
+                        events.append(
+                            CourseEvent(
+                                summary=summary,
+                                description=description,
+                                location=location,
+                                start_time=occ_local,
+                                end_time=occ_local + duration,
+                            )
                         )
-                    )
+
+                else:
+                    if dtstart.date() >= today:
+                        events.append(
+                            CourseEvent(
+                                summary=summary,
+                                description=description,
+                                location=location,
+                                start_time=dtstart,
+                                end_time=dtend,
+                            )
+                        )
+            except Exception as e:
+                logger.warning(f"[course] skip invalid vevent: {e}")
+                continue
 
         events.sort(key=lambda e: e.start_time)
         self._cache[file_path] = events

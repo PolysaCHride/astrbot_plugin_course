@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timedelta
+import json
+from datetime import datetime, timedelta
 from typing import Dict, Optional, Set
 
 from astrbot.api import logger
@@ -372,11 +373,19 @@ class CoursePlugin(Star):
             return
 
         cron_expr = f"{minute} {hour} * * *"
-        job_id = f"course_daily_push_{user_id}"
 
         binding = self._storage.get_binding(user_id)
         if not binding:
             return
+
+        old_job_ids = await self._collect_user_daily_job_ids(user_id, binding)
+        for old_job_id in old_job_ids:
+            try:
+                await self._context.cron_manager.delete_job(old_job_id)
+            except Exception as e:
+                logger.debug(
+                    f"[course] cleanup old cron job failed for {user_id}, job={old_job_id}: {e}"
+                )
 
         payload = {
             "user_id": user_id,
@@ -386,7 +395,7 @@ class CoursePlugin(Star):
         }
 
         try:
-            await self._context.cron_manager.add_basic_job(
+            job = await self._context.cron_manager.add_basic_job(
                 name=f"每日课表推送_{user_id}",
                 cron_expression=cron_expr,
                 handler=self._daily_push_handler,
@@ -396,18 +405,32 @@ class CoursePlugin(Star):
                 enabled=True,
                 persistent=True,
             )
+            bindings = self._storage.load_bindings()
+            if user_id in bindings:
+                bindings[user_id].daily_push_job_id = str(job.job_id)
+                self._storage.save_bindings(bindings)
             logger.info(f"[course] registered cron job for user {user_id} at {time_str}")
         except Exception as e:
             logger.error(f"[course] failed to register cron job for user {user_id}: {e}")
 
     async def _unregister_user_cron(self, user_id: str) -> None:
         """取消用户的每日推送 cron 任务"""
-        job_id = f"course_daily_push_{user_id}"
-        try:
-            await self._context.cron_manager.delete_job(job_id)
-            logger.info(f"[course] unregistered cron job for user {user_id}")
-        except Exception as e:
-            logger.debug(f"[course] failed to unregister cron job for user {user_id}: {e}")
+        binding = self._storage.get_binding(user_id)
+        job_ids = await self._collect_user_daily_job_ids(user_id, binding)
+        for job_id in job_ids:
+            try:
+                await self._context.cron_manager.delete_job(job_id)
+            except Exception as e:
+                logger.debug(
+                    f"[course] failed to unregister cron job for user {user_id}, job={job_id}: {e}"
+                )
+
+        bindings = self._storage.load_bindings()
+        if user_id in bindings:
+            bindings[user_id].daily_push_job_id = ""
+            self._storage.save_bindings(bindings)
+
+        logger.info(f"[course] unregistered cron jobs for user {user_id}: {len(job_ids)}")
 
     async def _daily_push_handler(self, **payload) -> None:
         """Cron 任务触发的每日推送处理函数"""
@@ -470,28 +493,78 @@ class CoursePlugin(Star):
             return
 
         now = datetime.now(SHANGHAI_TZ)
+        self._cleanup_reminded(now)
         for user_id, binding in bindings.items():
-            ics_path = (self._storage._base_dir / binding.ics_file).resolve()
-            events = self._parser.parse_ics_file(str(ics_path))
-            hits = upcoming_within_15m(
-                now=now,
-                user_id=user_id,
-                events=events,
-                advance_minutes=binding.reminder_advance_minutes,
-            )
-            if not hits:
-                continue
-
-            reminded = self._reminded.setdefault(user_id, set())
-            for hit in hits:
-                key = hit.event.reminder_key()
-                if key in reminded:
+            try:
+                ics_path = (self._storage._base_dir / binding.ics_file).resolve()
+                events = self._parser.parse_ics_file(str(ics_path))
+                hits = upcoming_within_15m(
+                    now=now,
+                    user_id=user_id,
+                    events=events,
+                    advance_minutes=binding.reminder_advance_minutes,
+                )
+                if not hits:
                     continue
-                reminded.add(key)
-                msg = _reminder_text(hit.event, binding.reminder_advance_minutes)
-                chain = MessageChain().message(msg)
-                session = MessageSession.from_str(binding.unified_msg_origin)
-                await self._context.send_message(session, chain)
+
+                reminded = self._reminded.setdefault(user_id, set())
+                for hit in hits:
+                    key = hit.event.reminder_key()
+                    if key in reminded:
+                        continue
+                    reminded.add(key)
+                    msg = _reminder_text(hit.event, binding.reminder_advance_minutes)
+                    chain = MessageChain().message(msg)
+                    session = MessageSession.from_str(binding.unified_msg_origin)
+                    await self._context.send_message(session, chain)
+            except Exception as e:
+                logger.error(f"[course] reminder failed for user {user_id}: {e}")
+
+    async def _collect_user_daily_job_ids(
+        self, user_id: str, binding=None
+    ) -> Set[str]:
+        job_ids: Set[str] = set()
+        if binding and binding.daily_push_job_id:
+            job_ids.add(binding.daily_push_job_id)
+
+        try:
+            jobs = await self._context.cron_manager.list_jobs("basic")
+        except Exception as e:
+            logger.debug(f"[course] list cron jobs failed: {e}")
+            return job_ids
+
+        for job in jobs:
+            payload = getattr(job, "payload", {}) or {}
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    payload = {}
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("user_id", "")) != user_id:
+                continue
+            name = str(getattr(job, "name", ""))
+            description = str(getattr(job, "description", ""))
+            if "每日课表推送" not in name and "每日课表推送" not in description:
+                continue
+            job_id = getattr(job, "job_id", "")
+            if job_id:
+                job_ids.add(str(job_id))
+        return job_ids
+
+    def _cleanup_reminded(self, now: datetime) -> None:
+        cutoff = now - timedelta(days=30)
+        for user_id in list(self._reminded.keys()):
+            kept: Set[str] = set()
+            for key in self._reminded[user_id]:
+                start_time = _reminder_start_from_key(key)
+                if start_time and start_time >= cutoff:
+                    kept.add(key)
+            if kept:
+                self._reminded[user_id] = kept
+            else:
+                self._reminded.pop(user_id, None)
 
 
 def _event_view(e: CourseEvent) -> Dict[str, str]:
@@ -507,6 +580,19 @@ def _reminder_text(e: CourseEvent, advance_minutes: int) -> str:
     if loc:
         return f"开课提醒：{advance_minutes} 分钟后上课《{e.summary}》，地点：{loc}"
     return f"开课提醒：{advance_minutes} 分钟后上课《{e.summary}》"
+
+
+def _reminder_start_from_key(key: str) -> Optional[datetime]:
+    start_str = key.split("|", 1)[0].strip()
+    if not start_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(start_str)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=SHANGHAI_TZ)
+    return dt.astimezone(SHANGHAI_TZ)
 
 
 async def _try_get_file_url(event: AstrMessageEvent) -> Optional[str]:
