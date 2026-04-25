@@ -61,7 +61,7 @@ class CoursePlugin(Star):
         nickname = str(event.get_sender_name())
 
         yield event.plain_result(
-            "请在 120 秒内发送 .ics 文件，或发送 WakeUp 分享口令（形如：...「32位口令」...）。\n"
+            "请在 120 秒内发送 .ics 文件。\n"
             "发送\"退出\"可取消。"
         )
 
@@ -73,31 +73,7 @@ class CoursePlugin(Star):
                 controller.stop()
                 return
 
-            token = self._parser.parse_wakeup_token(text)
             ics_path = self._storage.get_ics_path(user_id)
-
-            if token:
-                await evt.send(evt.plain_result("正在获取课表..."))
-                data = await self._parser.fetch_wakeup_schedule(token)
-                if not data:
-                    await evt.send(evt.plain_result("无法获取 WakeUp 数据，请检查口令。"))
-                    controller.stop()
-                    return
-                ics_content = self._parser.convert_wakeup_to_ics(data)
-                if not ics_content:
-                    await evt.send(evt.plain_result("WakeUp 数据解析失败。"))
-                    controller.stop()
-                    return
-                ics_path.write_text(ics_content, encoding="utf-8")
-                self._parser.clear_cache(str(ics_path))
-                self._storage.upsert_binding(
-                    user_id=user_id,
-                    unified_msg_origin=evt.unified_msg_origin,
-                    nickname=nickname,
-                )
-                await evt.send(evt.plain_result("绑定成功。"))
-                controller.stop()
-                return
 
             file_url = await _try_get_file_url(evt)
             if file_url:

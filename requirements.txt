@@ -1,3 +1,2 @@
 icalendar
 python-dateutil
-aiohttp
