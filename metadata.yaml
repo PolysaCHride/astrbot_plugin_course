@@ -1,5 +1,6 @@
 name: astrbot_plugin_course
-display_name: 课表
-desc: 绑定个人课表，查看今日/明日/本周课表，并在开课前 15 分钟提醒。
-version: v0.1.0
-author: ulw
+display_name: 课表提醒
+desc: 绑定个人课表，查看今日/明日/本周/下周课表，并支持开课前发送课程提醒，以及每日定时发送课表。
+version: 1.5.1
+astrbot_version: ">=4.19.4"
+support_platforms: aiocqhttp

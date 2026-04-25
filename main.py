@@ -21,9 +21,9 @@ from .storage import CourseStorage
 
 @register(
     "astrbot_plugin_course",
-    "ulw",
-    "绑定个人课表，查看今日/明日/本周课表，并在开课前 15 分钟提醒。",
-    "0.1.0",
+    "NimYA",
+    "绑定个人课表，查看今日/明日/本周/下周课表，并支持开课前发送课程提醒，以及每日定时发送课表。",
+    "1.5.1",
 )
 class CoursePlugin(Star):
     def __init__(self, context: Context):
@@ -305,7 +305,14 @@ class CoursePlugin(Star):
         title = f"本周课表"
         subtitle = f"{binding.nickname} | {start.strftime('%Y-%m-%d')} ~ {(start + timedelta(days=6)).strftime('%Y-%m-%d')}"
         url = await self.html_render(
-            WEEK_TMPL, {"title": title, "subtitle": subtitle, "days": days}
+            WEEK_TMPL,
+            {
+                "title": title,
+                "subtitle": subtitle,
+                "days": days,
+                "page_width": 1280,
+            },
+            options={"quality": 100},
         )
         yield event.image_result(url)
 
@@ -340,7 +347,14 @@ class CoursePlugin(Star):
         title = f"下周课表"
         subtitle = f"{binding.nickname} | {start.strftime('%Y-%m-%d')} ~ {(start + timedelta(days=6)).strftime('%Y-%m-%d')}"
         url = await self.html_render(
-            WEEK_TMPL, {"title": title, "subtitle": subtitle, "days": days}
+            WEEK_TMPL,
+            {
+                "title": title,
+                "subtitle": subtitle,
+                "days": days,
+                "page_width": 1280,
+            },
+            options={"quality": 100},
         )
         yield event.image_result(url)
 
@@ -363,7 +377,13 @@ class CoursePlugin(Star):
         courses = [_event_view(e) for e in day_list]
         url = await self.html_render(
             DAY_TMPL,
-            {"title": title, "subtitle": subtitle, "courses": courses},
+            {
+                "title": title,
+                "subtitle": subtitle,
+                "courses": courses,
+                "page_width": 500,
+            },
+            options={"quality": 100},
         )
         yield event.image_result(url)
 
@@ -441,7 +461,13 @@ class CoursePlugin(Star):
             courses = [_event_view(e) for e in day_list]
             url = await self.html_render(
                 DAY_TMPL,
-                {"title": title, "subtitle": subtitle, "courses": courses},
+                {
+                    "title": title,
+                    "subtitle": subtitle,
+                    "courses": courses,
+                    "page_width": 500,
+                },
+                options={"quality": 100},
             )
 
             session = MessageSession.from_str(binding.unified_msg_origin)
