@@ -1,5 +1,1 @@
-data/t2i_templates/astrbot_powershell.html
-data/t2i_templates/base.html
-data/cmd_config.json
-.gitignore
-data
+data/
