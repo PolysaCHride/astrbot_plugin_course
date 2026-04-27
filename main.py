@@ -37,24 +37,74 @@ class CoursePlugin(Star):
         self._reminded: Dict[str, Set[str]] = {}
         self._stop_event = asyncio.Event()
         self._reminder_task: Optional[asyncio.Task[None]] = None
+        self._initializing_lock = asyncio.Lock()
 
     async def initialize(self):
-        self._stop_event.clear()
-        self._reminder_task = asyncio.create_task(self._reminder_loop())
+        # 使用锁防止并发初始化
+        async with self._initializing_lock:
+            logger.info("[course] initializing reminder system...")
+            
+            # 检查并安全取消旧任务
+            if self._reminder_task is not None:
+                if not self._reminder_task.done():
+                    logger.info("[course] cancelling old reminder task...")
+                    self._stop_event.set()
+                    self._reminder_task.cancel()
+                    try:
+                        # 等待任务完全终止（超时 5 秒）
+                        await asyncio.wait_for(self._reminder_task, timeout=5)
+                    except asyncio.CancelledError:
+                        logger.info("[course] old reminder task cancelled successfully")
+                    except asyncio.TimeoutError:
+                        logger.warning("[course] old reminder task did not terminate within timeout")
+                    except Exception as e:
+                        logger.warning(f"[course] unexpected error waiting for old task: {e}")
+                self._reminder_task = None
+            
+            # 重置所有状态
+            self._reminded.clear()  # 清空提醒记录
+            self._stop_event.clear()  # 清除停止信号
+            logger.info("[course] reminder state reset")
+            
+            # 创建新任务
+            self._reminder_task = asyncio.create_task(self._reminder_loop())
+            logger.info("[course] new reminder task created")
 
+        # 注册用户的每日推送任务（在锁外执行，避免阻塞）
         bindings = self._storage.load_bindings()
         for user_id, binding in bindings.items():
             if binding.enable_daily_push and binding.daily_push_time:
-                await self._register_user_cron(user_id, binding.daily_push_time)
+                try:
+                    await self._register_user_cron(user_id, binding.daily_push_time)
+                except Exception as e:
+                    logger.error(f"[course] failed to register cron for user {user_id}: {e}")
 
     async def terminate(self):
+        logger.info("[course] terminating reminder system...")
+        
+        # 设置停止信号
         self._stop_event.set()
-        if self._reminder_task:
-            self._reminder_task.cancel()
-            try:
-                await self._reminder_task
-            except asyncio.CancelledError:
-                pass
+        
+        # 安全取消任务并等待其完全终止
+        if self._reminder_task is not None:
+            if not self._reminder_task.done():
+                logger.info("[course] cancelling reminder task...")
+                self._reminder_task.cancel()
+                try:
+                    # 等待任务完全终止（超时 5 秒）
+                    await asyncio.wait_for(self._reminder_task, timeout=5)
+                except asyncio.CancelledError:
+                    logger.info("[course] reminder task cancelled successfully")
+                except asyncio.TimeoutError:
+                    logger.warning("[course] reminder task did not terminate within timeout")
+                except Exception as e:
+                    logger.warning(f"[course] unexpected error during task termination: {e}")
+            self._reminder_task = None
+        
+        # 清空提醒状态
+        self._reminded.clear()
+        
+        logger.info("[course] reminder system terminated")
 
     @filter.command("绑定课表")
     async def bind(self, event: AstrMessageEvent):
