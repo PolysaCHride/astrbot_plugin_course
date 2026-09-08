@@ -20,6 +20,20 @@ from .schedule_engine import day_events, upcoming_within_15m, week_start
 from .storage import CourseStorage
 
 
+# DAY_TMPL is rendered with full-page capture so short schedules do not retain
+# the renderer's default viewport height as a large blank tail.
+DAY_RENDER_OPTIONS = {
+    "quality": 100,
+    "full_page": True,
+    "viewport_height": 1,
+}
+
+
+def _day_render_options() -> Dict[str, object]:
+    """Return an isolated render-options mapping for each render call."""
+    return dict(DAY_RENDER_OPTIONS)
+
+
 @register(
     "astrbot_plugin_course",
     "NimYA",
@@ -410,7 +424,7 @@ class CoursePlugin(Star):
                 "courses": courses,
                 "page_width": 500,
             },
-            options={"quality": 100},
+            options=_day_render_options(),
         )
         yield event.image_result(url)
 
@@ -516,7 +530,7 @@ class CoursePlugin(Star):
                     "courses": courses,
                     "page_width": 500,
                 },
-                options={"quality": 100},
+                options=_day_render_options(),
             )
 
             session = MessageSession.from_str(binding.unified_msg_origin)
