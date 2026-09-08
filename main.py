@@ -15,7 +15,7 @@ from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
 from .course_types import CourseEvent
 from .ics_parser import IcsParser, SHANGHAI_TZ
-from .render_templates import DAY_TMPL, WEEK_TMPL
+from .render_templates import DAY_TMPL, WEEK_PAGE_WIDTH, WEEK_TMPL
 from .schedule_engine import day_events, upcoming_within_15m, week_start
 from .storage import CourseStorage
 
@@ -337,7 +337,7 @@ class CoursePlugin(Star):
                 "title": title,
                 "subtitle": subtitle,
                 "days": days,
-                "page_width": 1280,
+                "page_width": WEEK_PAGE_WIDTH,
             },
             options={"quality": 100},
         )
@@ -379,7 +379,7 @@ class CoursePlugin(Star):
                 "title": title,
                 "subtitle": subtitle,
                 "days": days,
-                "page_width": 1280,
+                "page_width": WEEK_PAGE_WIDTH,
             },
             options={"quality": 100},
         )

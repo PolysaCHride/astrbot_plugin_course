@@ -1,3 +1,5 @@
+WEEK_PAGE_WIDTH = 480
+
 DAY_TMPL = r"""
 <!doctype html>
 <html lang="zh">
@@ -127,7 +129,7 @@ WEEK_TMPL = r"""
 <html lang="zh">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=480, initial-scale=1" />
+  <meta name="viewport" content="width={{ page_width }}, initial-scale=1" />
   <style>
     :root {
       --bg: #f8fafc;
@@ -142,7 +144,7 @@ WEEK_TMPL = r"""
     body {
       background: var(--bg);
       font-family: 'PingFang SC', sans-serif;
-      width: 480px;
+      width: {{ page_width }}px;
       padding-bottom: 30px;
     }
     .container { padding: 20px; }
