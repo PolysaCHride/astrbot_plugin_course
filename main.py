@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Set
+from types import MappingProxyType
+from typing import Dict, Mapping, Optional, Set
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -15,9 +16,26 @@ from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
 from .course_types import CourseEvent
 from .ics_parser import IcsParser, SHANGHAI_TZ
-from .render_templates import DAY_TMPL, WEEK_TMPL
+from .render_templates import DAY_TMPL, WEEK_PAGE_WIDTH, WEEK_TMPL
 from .schedule_engine import day_events, upcoming_within_15m, week_start
 from .storage import CourseStorage
+
+
+# Every schedule uses content-sized full-page capture.  Keep the shared
+# defaults immutable and return a fresh mapping for each renderer call so a
+# downstream renderer cannot mutate options used by another schedule.
+SCHEDULE_RENDER_OPTIONS: Mapping[str, object] = MappingProxyType(
+    {
+        "quality": 100,
+        "full_page": True,
+        "viewport_height": 1,
+    }
+)
+
+
+def _schedule_render_options() -> Dict[str, object]:
+    """Return isolated adaptive full-page options for each render call."""
+    return dict(SCHEDULE_RENDER_OPTIONS)
 
 
 @register(
@@ -337,9 +355,9 @@ class CoursePlugin(Star):
                 "title": title,
                 "subtitle": subtitle,
                 "days": days,
-                "page_width": 1280,
+                "page_width": WEEK_PAGE_WIDTH,
             },
-            options={"quality": 100},
+            options=_schedule_render_options(),
         )
         yield event.image_result(url)
 
@@ -379,9 +397,9 @@ class CoursePlugin(Star):
                 "title": title,
                 "subtitle": subtitle,
                 "days": days,
-                "page_width": 1280,
+                "page_width": WEEK_PAGE_WIDTH,
             },
-            options={"quality": 100},
+            options=_schedule_render_options(),
         )
         yield event.image_result(url)
 
@@ -410,7 +428,7 @@ class CoursePlugin(Star):
                 "courses": courses,
                 "page_width": 500,
             },
-            options={"quality": 100},
+            options=_schedule_render_options(),
         )
         yield event.image_result(url)
 
@@ -516,7 +534,7 @@ class CoursePlugin(Star):
                     "courses": courses,
                     "page_width": 500,
                 },
-                options={"quality": 100},
+                options=_schedule_render_options(),
             )
 
             session = MessageSession.from_str(binding.unified_msg_origin)
