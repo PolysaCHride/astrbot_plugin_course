@@ -24,7 +24,8 @@ class IcsParser:
             return self._cache[file_path]
 
         try:
-            cal_content = open(file_path, "r", encoding="utf-8").read()
+            with open(file_path, "r", encoding="utf-8") as calendar_file:
+                cal_content = calendar_file.read()
         except Exception as e:
             logger.error(f"[course] cannot read ics: {e}")
             return []
