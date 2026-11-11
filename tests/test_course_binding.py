@@ -33,7 +33,7 @@ class FileStub:
 def _load_plugin():
     names = (
         "astrbot", "astrbot.api", "astrbot.api.event", "astrbot.api.message_components",
-        "astrbot.api.star", "astrbot.core", "astrbot.core.platform",
+        "astrbot.api.star", "astrbot.api.provider", "astrbot.core", "astrbot.core.platform",
         "astrbot.core.platform.message_session", "astrbot.core.utils",
         "astrbot.core.utils.io", "astrbot.core.utils.session_waiter",
     )
@@ -42,8 +42,11 @@ def _load_plugin():
     modules["astrbot.api.event"].AstrMessageEvent = Mock
     modules["astrbot.api.event"].MessageChain = Mock
     modules["astrbot.api.event"].filter = types.SimpleNamespace(
-        command=lambda *args, **kwargs: lambda function: function
+        command=lambda *args, **kwargs: lambda function: function,
+        on_llm_request=lambda: lambda function: function,
+        llm_tool=lambda *, name: lambda function: function,
     )
+    modules["astrbot.api.provider"].ProviderRequest = Mock
     modules["astrbot.api.message_components"].File = FileStub
     modules["astrbot.api.message_components"].Image = Mock
     modules["astrbot.api.star"].Star = type("Star", (), {})

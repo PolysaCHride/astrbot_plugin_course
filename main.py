@@ -9,10 +9,12 @@ from typing import Dict, Mapping, Optional, Set
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import File, Image
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
+from .course_chat import CHAT_HINT, TOOL_NAME, query_schedule
 from .course_types import CourseEvent
 from .file_import import InvalidScheduleFile, import_schedule_file
 from .ics_parser import IcsParser, SHANGHAI_TZ
@@ -41,8 +43,8 @@ def _schedule_render_options() -> Dict[str, object]:
 @register(
     "astrbot_plugin_course",
     "NimYA",
-    "绑定个人课表，查看今日/明日/本周/下周课表，并支持开课前发送课程提醒，以及每日定时发送课表。",
-    "1.7.1",
+    "绑定个人课表后可在对话中查询课程，也支持课表图片、课前提醒和每日推送。",
+    "1.8.0",
 )
 class CoursePlugin(Star):
     def __init__(self, context: Context):
@@ -328,6 +330,38 @@ class CoursePlugin(Star):
             f"提前提醒：{binding.reminder_advance_minutes} 分钟"
         )
         yield event.plain_result(settings_text)
+
+    @filter.on_llm_request()
+    async def add_course_hint(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+        if req.func_tool and req.func_tool.get_tool(TOOL_NAME):
+            prompt = req.system_prompt or ""
+            if CHAT_HINT not in prompt:
+                req.system_prompt = f"{prompt}\n{CHAT_HINT}" if prompt else CHAT_HINT
+
+    @filter.llm_tool(name=TOOL_NAME)
+    async def get_my_course_schedule(self, event: AstrMessageEvent, period: str = "今天") -> str:
+        """查询当前发言者自己绑定的课表，供回答日程、课程时间和教室问题时使用。
+
+        Args:
+            period(string): 查询时间。使用今天、明天、后天、本周、下周、现在、下一节、课程列表、本周三或下周五等星期，或 YYYY-MM-DD。课程列表返回今起一年内的课程名称，下一节查找该范围内尚未开始的第一节课。
+        """
+        sender = event.get_sender_id()
+        binding = self._storage.get_binding(str(sender)) if sender else None
+        if not binding or (
+            binding.unified_msg_origin.partition(":")[0]
+            != event.unified_msg_origin.partition(":")[0]
+        ):
+            return "当前发言者还没有在这个机器人上绑定课表。请先发送 /绑定课表 并上传 .ics 文件。"
+        if not isinstance(period, str):
+            return "查询时间必须是字符串，例如今天或下周三。"
+        path = self._storage._base_dir / binding.ics_file
+        try:
+            return await asyncio.to_thread(
+                query_schedule, self._parser, str(path), period, datetime.now(SHANGHAI_TZ)
+            )
+        except Exception as exc:
+            logger.warning(f"[course] cannot read schedule for LLM tool: {exc}")
+            return "无法读取已绑定的课表。请使用 /绑定课表 重新上传有效的 .ics 文件。"
 
     @filter.command("今日课表")
     async def today(self, event: AstrMessageEvent):
