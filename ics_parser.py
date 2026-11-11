@@ -12,6 +12,12 @@ from .course_types import CourseEvent
 SHANGHAI_TZ = timezone(timedelta(hours=8))
 
 
+def _aware(value: date | datetime) -> datetime:
+    if not isinstance(value, datetime):
+        value = datetime.combine(value, dt_time.min)
+    return value if value.tzinfo else value.replace(tzinfo=SHANGHAI_TZ)
+
+
 class IcsParser:
     def __init__(self):
         self._cache: dict[str, list[CourseEvent]] = {}
@@ -24,17 +30,30 @@ class IcsParser:
             return self._cache[file_path]
 
         try:
-            cal_content = open(file_path, "r", encoding="utf-8").read()
+            events = self.read_events(file_path, datetime.now(SHANGHAI_TZ).date())
         except Exception as e:
-            logger.error(f"[course] cannot read ics: {e}")
+            logger.error(f"[course] cannot read calendar: {e}")
             return []
+        self._cache[file_path] = events
+        return events
 
-        try:
-            cal = Calendar.from_ical(cal_content)
-        except Exception as e:
-            logger.error(f"[course] invalid ics format: {e}")
-            return []
-        today = datetime.now(SHANGHAI_TZ).date()
+    def read_events(
+        self, file_path: str, start_date: date, end_date: date | None = None
+    ) -> list[CourseEvent]:
+        """Read an inclusive range of Shanghai dates. Propagate file/format errors.
+
+        Without an end date, keep all future standalone events and expand one year
+        of recurring events, as required by the existing schedule commands.
+        """
+        with open(file_path, "rb") as calendar_file:
+            cal = Calendar.from_ical(calendar_file.read())
+        if cal.name != "VCALENDAR":
+            raise ValueError("Expected a VCALENDAR component")
+        start = datetime.combine(start_date, dt_time.min, SHANGHAI_TZ)
+        end = (
+            datetime.combine(end_date + timedelta(days=1), dt_time.min, SHANGHAI_TZ)
+            if end_date is not None else start + timedelta(days=365)
+        )
 
         events: list[CourseEvent] = []
 
@@ -51,25 +70,10 @@ class IcsParser:
                 if not dtstart_obj or not dtend_obj:
                     logger.warning("[course] skip invalid vevent: missing dtstart/dtend")
                     continue
-                dtstart = dtstart_obj.dt
-                dtend = dtend_obj.dt
+                rule_start = _aware(dtstart_obj.dt)
+                dtstart = rule_start.astimezone(SHANGHAI_TZ)
+                dtend = _aware(dtend_obj.dt).astimezone(SHANGHAI_TZ)
                 rrule_str = component.get("rrule")
-
-                if isinstance(dtstart, date) and not isinstance(dtstart, datetime):
-                    dtstart = datetime.combine(dtstart, dt_time.min)
-                if isinstance(dtend, date) and not isinstance(dtend, datetime):
-                    dtend = datetime.combine(dtend, dt_time.min)
-
-                dtstart = (
-                    dtstart.astimezone(SHANGHAI_TZ)
-                    if getattr(dtstart, "tzinfo", None)
-                    else dtstart.replace(tzinfo=SHANGHAI_TZ)
-                )
-                dtend = (
-                    dtend.astimezone(SHANGHAI_TZ)
-                    if getattr(dtend, "tzinfo", None)
-                    else dtend.replace(tzinfo=SHANGHAI_TZ)
-                )
 
                 duration = dtend - dtstart
 
@@ -84,18 +88,20 @@ class IcsParser:
                             until_dt = until_dt.replace(tzinfo=SHANGHAI_TZ)
                         rrule_str["UNTIL"][0] = until_dt.astimezone(timezone.utc)
 
-                    dtstart_utc = dtstart.astimezone(timezone.utc)
-                    rule = rrulestr(rrule_str.to_ical().decode(), dtstart=dtstart_utc)
+                    # BYDAY and BYHOUR refer to the course's local clock.
+                    rule = rrulestr(rrule_str.to_ical().decode(), dtstart=rule_start)
+                    exdates = component.get("exdate", [])
+                    if not isinstance(exdates, list):
+                        exdates = [exdates]
+                    excluded = {_aware(item.dt) for group in exdates for item in group.dts}
 
-                    start_of_today_utc = datetime.now(timezone.utc).replace(
-                        hour=0, minute=0, second=0, microsecond=0
-                    )
-                    future_limit_utc = start_of_today_utc + timedelta(days=365)
-
-                    for occ_utc in rule.between(
-                        start_of_today_utc, future_limit_utc, inc=True
-                    ):
-                        occ_local = occ_utc.astimezone(SHANGHAI_TZ)
+                    # An occurrence starting before midnight may still be in progress.
+                    for occurrence in rule.between(start - duration, end, inc=True):
+                        if occurrence in excluded:
+                            continue
+                        occ_local = occurrence.astimezone(SHANGHAI_TZ)
+                        if occ_local >= end or (occ_local < start and occ_local + duration <= start):
+                            continue
                         events.append(
                             CourseEvent(
                                 summary=summary,
@@ -107,7 +113,7 @@ class IcsParser:
                         )
 
                 else:
-                    if dtstart.date() >= today:
+                    if (dtstart >= start or dtend > start) and (end_date is None or dtstart < end):
                         events.append(
                             CourseEvent(
                                 summary=summary,
@@ -122,5 +128,4 @@ class IcsParser:
                 continue
 
         events.sort(key=lambda e: e.start_time)
-        self._cache[file_path] = events
         return events

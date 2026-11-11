@@ -8,13 +8,15 @@ from typing import Dict, Mapping, Optional, Set
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import Image
+from astrbot.api.message_components import File, Image
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.core.platform.message_session import MessageSession
-from astrbot.core.utils.io import download_file
 from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
+from .course_chat import CHAT_HINT, TOOL_NAME, query_schedule
 from .course_types import CourseEvent
+from .file_import import InvalidScheduleFile, import_schedule_file
 from .ics_parser import IcsParser, SHANGHAI_TZ
 from .render_templates import DAY_TMPL, WEEK_PAGE_WIDTH, WEEK_TMPL
 from .schedule_engine import day_events, upcoming_within_15m, week_start
@@ -41,8 +43,8 @@ def _schedule_render_options() -> Dict[str, object]:
 @register(
     "astrbot_plugin_course",
     "NimYA",
-    "绑定个人课表，查看今日/明日/本周/下周课表，并支持开课前发送课程提醒，以及每日定时发送课表。",
-    "1.5.1",
+    "绑定个人课表后可在对话中查询课程，也支持课表图片、课前提醒和每日推送。",
+    "1.8.0",
 )
 class CoursePlugin(Star):
     def __init__(self, context: Context):
@@ -142,13 +144,19 @@ class CoursePlugin(Star):
                 controller.stop()
                 return
 
-            ics_path = self._storage.get_ics_path(user_id)
-
-            file_url = await _try_get_file_url(evt)
-            if file_url:
-                await evt.send(evt.plain_result("正在下载课表..."))
+            attachment = next(
+                (message for message in evt.get_messages() if isinstance(message, File)),
+                None,
+            )
+            if attachment is not None:
+                # Give an upload received near the deadline time to finish.
+                controller.keep(timeout=120, reset_timeout=True)
+                ics_path = self._storage.get_ics_path(user_id)
                 try:
-                    await download_file(file_url, str(ics_path))
+                    await evt.send(evt.plain_result("正在读取课表..."))
+                    await asyncio.wait_for(
+                        import_schedule_file(attachment, ics_path), timeout=60
+                    )
                     self._parser.clear_cache(str(ics_path))
                     self._storage.upsert_binding(
                         user_id=user_id,
@@ -156,13 +164,27 @@ class CoursePlugin(Star):
                         nickname=nickname,
                     )
                     await evt.send(evt.plain_result("绑定成功。"))
-                    controller.stop()
+                except InvalidScheduleFile:
+                    await evt.send(evt.plain_result(
+                        "文件不是有效的 .ics 课表，请重新发送 /绑定课表，上传导出的 .ics 文件。"
+                    ))
+                except asyncio.TimeoutError:
+                    logger.warning("[course] reading schedule attachment timed out")
+                    await evt.send(evt.plain_result(
+                        "课表文件读取超时，请重新发送 /绑定课表 后重试。"
+                    ))
                 except Exception as e:
-                    logger.error(f"[course] download ics failed: {e}")
-                    await evt.send(evt.plain_result("文件下载失败，请重试。"))
+                    logger.error(f"[course] import ics failed: {e}")
+                    await evt.send(evt.plain_result(
+                        "课表文件读取或保存失败，请重新发送 /绑定课表 后重试。"
+                    ))
+                finally:
                     controller.stop()
                 return
 
+            await evt.send(evt.plain_result(
+                "未检测到课表文件，请直接发送导出的 .ics 文件附件；发送\"退出\"可取消。"
+            ))
             controller.keep(timeout=120, reset_timeout=True)
 
         try:
@@ -308,6 +330,38 @@ class CoursePlugin(Star):
             f"提前提醒：{binding.reminder_advance_minutes} 分钟"
         )
         yield event.plain_result(settings_text)
+
+    @filter.on_llm_request()
+    async def add_course_hint(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+        if req.func_tool and req.func_tool.get_tool(TOOL_NAME):
+            prompt = req.system_prompt or ""
+            if CHAT_HINT not in prompt:
+                req.system_prompt = f"{prompt}\n{CHAT_HINT}" if prompt else CHAT_HINT
+
+    @filter.llm_tool(name=TOOL_NAME)
+    async def get_my_course_schedule(self, event: AstrMessageEvent, period: str = "今天") -> str:
+        """查询当前发言者自己绑定的课表，供回答日程、课程时间和教室问题时使用。
+
+        Args:
+            period(string): 查询时间。使用今天、明天、后天、本周、下周、现在、下一节、课程列表、本周三或下周五等星期，或 YYYY-MM-DD。课程列表返回今起一年内的课程名称，下一节查找该范围内尚未开始的第一节课。
+        """
+        sender = event.get_sender_id()
+        binding = self._storage.get_binding(str(sender)) if sender else None
+        if not binding or (
+            binding.unified_msg_origin.partition(":")[0]
+            != event.unified_msg_origin.partition(":")[0]
+        ):
+            return "当前发言者还没有在这个机器人上绑定课表。请先发送 /绑定课表 并上传 .ics 文件。"
+        if not isinstance(period, str):
+            return "查询时间必须是字符串，例如今天或下周三。"
+        path = self._storage._base_dir / binding.ics_file
+        try:
+            return await asyncio.to_thread(
+                query_schedule, self._parser, str(path), period, datetime.now(SHANGHAI_TZ)
+            )
+        except Exception as exc:
+            logger.warning(f"[course] cannot read schedule for LLM tool: {exc}")
+            return "无法读取已绑定的课表。请使用 /绑定课表 重新上传有效的 .ics 文件。"
 
     @filter.command("今日课表")
     async def today(self, event: AstrMessageEvent):
@@ -661,25 +715,6 @@ def _reminder_start_from_key(key: str) -> Optional[datetime]:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=SHANGHAI_TZ)
     return dt.astimezone(SHANGHAI_TZ)
-
-
-async def _try_get_file_url(event: AstrMessageEvent) -> Optional[str]:
-    try:
-        messages = event.get_messages()
-        for m in messages:
-            if hasattr(m, "type") and getattr(m, "type") == "File":
-                get_file = getattr(m, "get_file", None)
-                if not callable(get_file):
-                    continue
-                file_path_obj = get_file(allow_return_url=True)
-                if not asyncio.iscoroutine(file_path_obj):
-                    continue
-                file_path = await file_path_obj
-                if isinstance(file_path, str) and file_path.startswith("http"):
-                    return file_path
-        return None
-    except Exception:
-        return None
 
 
 def _is_valid_time_format(time_str: str) -> bool:
